@@ -21,6 +21,7 @@ const valueToHex = function(value: number, byteCount: number) {
 export default class Decoder {
   private pmtPid = 0x0000;
   private nitPid = 0x0000;
+  private pcrPid = 0x0000;
   private streams: number[] = [];
   private streamMap: Record<number, StreamType> = {};
 
@@ -48,7 +49,6 @@ export default class Decoder {
   }
 
   async decode() {
-    console.log('decode')
     const videoChunks: Uint8Array<ArrayBuffer>[] = [];
     const maxCount = Math.ceil(this.file.size / PACKET_SIZE);
     for (let j = 0; j < maxCount; j++) {
@@ -82,27 +82,30 @@ export default class Decoder {
 
         const payloadStart = ((adaptationFieldControl & 0b10) ? view.getUint8(8) + 1 : 0) + 8;
 
-        // if (adaptationFieldControl & 0b10) {
-        //     const adaptationFieldLength = view.getUint8(8);
-        //     const valIdx9 = view.getUint8(9);
-        //     const discontinuityIndicator = Boolean(valIdx9 & 0x80);
-        //     const randomAccessIndicator = Boolean(valIdx9 & 0x40);
-        //     const elementaryStreamPriorityIndicator = Boolean(valIdx9 & 0x20);
-        //     const pcrFlag = Boolean(valIdx9 & 0x10);
-        //     const opcrFlag = Boolean(valIdx9 & 0x08);
-        //     const splicingPointFlag = Boolean(valIdx9 & 0x04);
-        //     const transportPrivateDataFlag = Boolean(valIdx9 & 0x02);
-        //     const adaptationFieldExtensionFlag = Boolean(valIdx9 & 0x01);
-        //     const valIdx10 = view.getBigUint64(10);
-        //     // if (opcrFlag || splicingPointFlag || transportPrivateDataFlag || adaptationFieldExtensionFlag)
-        //     //     console.log('hey!', pcrFlag, opcrFlag, splicingPointFlag, transportPrivateDataFlag, adaptationFieldExtensionFlag)
-        //     // const pcrRaw = (valIdx10 & 0xFFFFFFFFFFFF0000n) >> 16n;
-        //     // const pcrBase = (valIdx10 & 0xFFFFFF8000000000n) >> 39n;
-        //     // const pcrReserved = (valIdx10 & 0x000000007E000000n) >> 34n;
-        //     // const pcrExtension = (valIdx10 & 0x0000000001FF0000n) >> 16n;
-        //     // const pcr = pcrBase * 300n + pcrExtension;
-        //     // console.log(adaptationFieldControl);
-        // }
+        if (adaptationFieldControl & 0b10) {
+            // const adaptationFieldLength = view.getUint8(8);
+            // const valIdx9 = view.getUint8(9);
+            // const discontinuityIndicator = Boolean(valIdx9 & 0x80);
+            // const randomAccessIndicator = Boolean(valIdx9 & 0x40);
+            // const elementaryStreamPriorityIndicator = Boolean(valIdx9 & 0x20);
+            // const pcrFlag = Boolean(valIdx9 & 0x10);
+            // const opcrFlag = Boolean(valIdx9 & 0x08);
+            // const splicingPointFlag = Boolean(valIdx9 & 0x04);
+            // const transportPrivateDataFlag = Boolean(valIdx9 & 0x02);
+            // const adaptationFieldExtensionFlag = Boolean(valIdx9 & 0x01);
+            // const valIdx10 = view.getBigUint64(10);
+            // if (opcrFlag || splicingPointFlag || transportPrivateDataFlag || adaptationFieldExtensionFlag)
+            //     console.log('hey!', pcrFlag, opcrFlag, splicingPointFlag, transportPrivateDataFlag, adaptationFieldExtensionFlag)
+            // const pcrRaw = (valIdx10 & 0xFFFFFFFFFFFF0000n) >> 16n;
+            // const pcrBase = (valIdx10 & 0xFFFFFF8000000000n) >> 39n;
+            // const pcrReserved = (valIdx10 & 0x000000007E000000n) >> 34n;
+            // const pcrExtension = (valIdx10 & 0x0000000001FF0000n) >> 16n;
+            // const pcr = pcrBase * 300n + pcrExtension;
+            
+            // if (pid === this.pcrPid) {
+            //   console.log(pcr)
+            // }
+        }
 
         if (!(adaptationFieldControl & 0b01)) 
           continue;
@@ -172,7 +175,7 @@ export default class Decoder {
               const reservedPmt1 = (valIdx0 & 0xE000) >> 13;
               if (reservedPmt1 !== 0x07)
                 console.error('Invalid reserved bits.');
-              // const pcrPid = valIdx0 & 0x1FFF;
+              this.pcrPid = valIdx0 & 0x1FFF;
 
               const valIdx2 = payloadView.getUint16(dataIdx + 2);
               const reservedPmt2 = (valIdx2 & 0xF000) >> 12;
@@ -222,7 +225,7 @@ export default class Decoder {
           continue;
         }
 
-        if (pid === this.nitPid || pid === 0x1FFF) // Null packet
+        if (pid === this.nitPid || pid === this.pcrPid || pid === 0x1FFF) // Null packet
           continue;
 
         if (!this.streams.includes(pid)) {

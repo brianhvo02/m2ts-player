@@ -2,6 +2,11 @@ import { useRef, useState } from 'react';
 import './App.css';
 import Decoder from './Decoder';
 
+const SAMPLE_RATE = 48000;
+const CHANNELS = 2;
+const SECONDS_COUNT = Math.floor((2**30 / 4) / (SAMPLE_RATE * CHANNELS));
+const SECONDS_SIZE = SECONDS_COUNT * SAMPLE_RATE * CHANNELS;
+
 const videoDecoder = new VideoDecoder({
   output(frame) {
     const canvas = document.querySelector('canvas');
@@ -15,6 +20,9 @@ const videoDecoder = new VideoDecoder({
     console.error(e);
   },
 });
+
+const ctx = new AudioContext();
+const buf = ctx.createBuffer(CHANNELS, SECONDS_SIZE, SAMPLE_RATE);
 
 export default function App() {
   const decoderRef = useRef<Decoder>(null);
