@@ -1,0 +1,10 @@
+html, body, #root, main {
+  background: black;
+  width: 100%;
+  height: 100%;
+}
+
+canvas {
+  width: 960px;
+  height: auto;
+}
