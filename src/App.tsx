@@ -14,7 +14,7 @@ export default function App() {
 
         if (decoder) decoder.decode();
       }}>Create</button>
-      <button onClick={() => demuxerRef.current?.sourceNode.start()}>Play</button>
+      <button onClick={() => demuxerRef.current?.play()}>Play</button>
     </main>
   )
 };

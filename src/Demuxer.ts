@@ -37,14 +37,20 @@ export default class Demuxer {
   private chunksMap: Record<number, Uint8Array<ArrayBuffer>[]> = {};
   private bufferMap: Record<number, AudioBuffer> = {};
   private audioOffset: Record<number, number> = {};
+  private frames: VideoFrame[] = [];
+  private frameCount = 0;
 
-  private videoConf = false;
   private videoInit = false;
+  private videoConf = false;
+  private videoResize = false;
 
   file: File;
   videoDecoder: VideoDecoder;
   audioContext: AudioContext;
   sourceNode: AudioBufferSourceNode;
+
+  startTime: number | null = null;
+  animationId: number | null = null;
 
   static async init() {
     const file = await new Promise<File | null>(resolve => {
@@ -63,14 +69,8 @@ export default class Demuxer {
 
     this.videoDecoder = new VideoDecoder({
       output: (frame) => {
-        // const canvas = document.querySelector('canvas');
-        // const ctx = canvas?.getContext('2d');
-        // if (!canvas || !ctx) return;
-        // canvas.width = frame.codedWidth;
-        // canvas.height = frame.codedHeight;
-        // ctx.drawImage(frame, 0, 0);
-        console.log(this.audioContext.currentTime)
-        frame.close();
+        this.frames.push(frame);
+        // frame.close();
       },
       error(e) {
         console.error(e);
@@ -80,6 +80,52 @@ export default class Demuxer {
     this.audioContext = new AudioContext();
     this.sourceNode = this.audioContext.createBufferSource();
     this.sourceNode.connect(this.audioContext.destination);
+  }
+
+  stop() {
+    if (this.animationId)
+      cancelAnimationFrame(this.animationId);
+    if (this.startTime)
+      this.sourceNode.stop();
+
+    this.animationId = null;
+    this.startTime = null;
+  }
+
+  async animate() {
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas?.getContext('2d');
+    if (!canvas || !ctx) return;
+
+    if (!this.animationId)
+      return;
+    if (!this.startTime)
+      return cancelAnimationFrame(this.animationId);
+
+    const time = this.audioContext.currentTime - this.startTime;
+
+    while (time * 24000/1001 > this.frameCount) {
+      const frame = this.frames.shift();
+      if (!frame) break;
+
+      if (!this.videoResize) {
+        canvas.width = frame.codedWidth;
+        canvas.height = frame.codedHeight;
+        this.videoResize = true;
+      }
+      ctx.drawImage(frame, 0, 0);
+
+      frame.close();
+      this.frameCount++;
+    }
+
+    this.animationId = requestAnimationFrame(() => this.animate());
+  }
+
+  play() {
+    this.sourceNode.start();
+    this.startTime = this.audioContext.currentTime;
+    this.animationId = requestAnimationFrame(() => this.animate());
   }
 
   async decode() {
