@@ -28,7 +28,7 @@ const valueToHex = function(value: number, byteCount: number) {
   return '0x' + value.toString(16).padStart(byteCount * 2, '0').toUpperCase();
 }
 
-export default class Decoder {
+export default class Demuxer {
   private pmtPid = 0x0000;
   private nitPid = 0x0000;
   private pcrPid = 0x0000;
@@ -62,13 +62,14 @@ export default class Decoder {
     this.file = file;
 
     this.videoDecoder = new VideoDecoder({
-      output(frame) {
-        const canvas = document.querySelector('canvas');
-        const ctx = canvas?.getContext('2d');
-        if (!canvas || !ctx) return;
-        canvas.width = frame.codedWidth;
-        canvas.height = frame.codedHeight;
-        ctx.drawImage(frame, 0, 0);
+      output: (frame) => {
+        // const canvas = document.querySelector('canvas');
+        // const ctx = canvas?.getContext('2d');
+        // if (!canvas || !ctx) return;
+        // canvas.width = frame.codedWidth;
+        // canvas.height = frame.codedHeight;
+        // ctx.drawImage(frame, 0, 0);
+        console.log(this.audioContext.currentTime)
         frame.close();
       },
       error(e) {
@@ -288,9 +289,20 @@ export default class Decoder {
 
           // const streamId = packetView.getUint8(3);
           // const packetLength = packetView.getUint16(4);
-          // const header = packetView.getUint16(6);
+          const header = packetView.getUint16(6);
+          const ptsDtsIndicator = (header & 0xC0) >> 6;
           const headerLength = packetView.getUint8(8);
-          
+          const timestamp = ptsDtsIndicator ? Number(
+            (BigInt(packet[9]) & 0x0En) << 30n |
+            (BigInt(packetView.getUint16(10)) & 0xFFFEn) << 15n |
+            (BigInt(packetView.getUint16(12)) & 0xFFFEn)
+          ) : null;
+
+          if (!timestamp) {
+            console.error('No PTS in PES packet.');
+            return;
+          }
+
           const data = packet.slice(9 + headerLength);
 
           switch (this.streamMap[pid]) {
@@ -301,7 +313,7 @@ export default class Decoder {
               
               this.videoDecoder.decode(new EncodedVideoChunk({
                 type: data[5] === 0x10 ? 'key' : 'delta',
-                timestamp: 0,
+                timestamp,
                 data,
               }));
 
@@ -310,8 +322,6 @@ export default class Decoder {
               break;
             }
             case StreamType.AUDIO_PCM: {
-              if (pid !== 0x1100)
-                continue;
               const pcmHeader = data.slice(0, 4);
               const audio = data.slice(4);
 
@@ -338,7 +348,7 @@ export default class Decoder {
                   numOfChannels, secondsSize, sampleRate
                 );
                 
-                if (pid === 0x1100)
+                if (!Object.keys(this.bufferMap).length)
                   this.sourceNode.buffer = buffer;
 
                 this.bufferMap[pid] = buffer;
