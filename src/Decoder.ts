@@ -14,6 +14,16 @@ enum StreamType {
   PRESENTATION_GRAPHIC = 0x90,
 };
 
+const BITS_PER_SAMPLE = [0, 16, 20, 24];
+export enum ChannelLayouts {
+  MONO = 1, STEREO = 3, SURROUND,
+  LAYOUT_2_1, LAYOUT_4_0, LAYOUT_2_2,
+  LAYOUT_5_0, LAYOUT_5_1, LAYOUT_7_0,
+  LAYOUT_7_1,
+}
+
+const SAMPLE_RATES = [null, 48000, null, null, 96000, 192000];
+
 const valueToHex = function(value: number, byteCount: number) {
   return '0x' + value.toString(16).padStart(byteCount * 2, '0').toUpperCase();
 }
@@ -22,16 +32,21 @@ export default class Decoder {
   private pmtPid = 0x0000;
   private nitPid = 0x0000;
   private pcrPid = 0x0000;
-  private streams: number[] = [];
+  private streams: Set<number> = new Set();
   private streamMap: Record<number, StreamType> = {};
+  private chunksMap: Record<number, Uint8Array<ArrayBuffer>[]> = {};
+  private bufferMap: Record<number, AudioBuffer> = {};
+  private audioOffset: Record<number, number> = {};
 
   private videoConf = false;
   private videoInit = false;
 
   file: File;
   videoDecoder: VideoDecoder;
+  audioContext: AudioContext;
+  sourceNode: AudioBufferSourceNode;
 
-  static async init(videoDecoder: VideoDecoder) {
+  static async init() {
     const file = await new Promise<File | null>(resolve => {
       const input = document.createElement('input');
       input.type = 'file';
@@ -40,18 +55,36 @@ export default class Decoder {
       input.click();
     });
 
-    return file ? new this(file, videoDecoder) : file;
+    return file ? new this(file) : file;
   }
 
-  constructor(file: File, videoDecoder: VideoDecoder) {
+  constructor(file: File) {
     this.file = file;
-    this.videoDecoder = videoDecoder;
+
+    this.videoDecoder = new VideoDecoder({
+      output(frame) {
+        const canvas = document.querySelector('canvas');
+        const ctx = canvas?.getContext('2d');
+        if (!canvas || !ctx) return;
+        canvas.width = frame.codedWidth;
+        canvas.height = frame.codedHeight;
+        ctx.drawImage(frame, 0, 0);
+        frame.close();
+      },
+      error(e) {
+        console.error(e);
+      },
+    });
+
+    this.audioContext = new AudioContext();
+    this.sourceNode = this.audioContext.createBufferSource();
+    this.sourceNode.connect(this.audioContext.destination);
   }
 
   async decode() {
-    const videoChunks: Uint8Array<ArrayBuffer>[] = [];
     const maxCount = Math.ceil(this.file.size / PACKET_SIZE);
     for (let j = 0; j < maxCount; j++) {
+      const progress: Record<number, boolean> = {};
       const buf = await this.file.slice(j * PACKET_SIZE, (j + 1) * PACKET_SIZE).arrayBuffer();
       console.log('Load complete.', j);
       
@@ -60,6 +93,12 @@ export default class Decoder {
         : PACKET_COUNT;
 
       for (let i = 0; i < maxPacket; i++) {
+        const percent = Math.floor(i / maxPacket * 100);
+        if (percent % 10 === 0 && !progress[percent]) {
+          progress[percent] = true;
+          console.log(percent);
+        }
+
         const packet = new Uint8Array(buf.slice(i * 192, (i + 1) * 192));
         const view = new DataView(packet.buffer);
 
@@ -201,8 +240,9 @@ export default class Decoder {
 
                 // console.log('Stream Type:', StreamType[streamType]);
                 // console.log('Elementary PID:', valueToHex(elementaryPid, 2));
-                this.streamMap[elementaryPid] = streamType;
-                this.streams.push(elementaryPid);
+                this.streamMap[elementaryPid] ??= streamType;
+                this.chunksMap[elementaryPid] ??= [];
+                this.streams.add(elementaryPid);
 
                 if (streamType === StreamType.VIDEO_H264 && !this.videoConf) {
                   this.videoDecoder.configure({ codec: 'avc1.640029' });
@@ -228,55 +268,120 @@ export default class Decoder {
         if (pid === this.nitPid || pid === this.pcrPid || pid === 0x1FFF) // Null packet
           continue;
 
-        if (!this.streams.includes(pid)) {
+        if (!this.streams.has(pid)) {
           console.error('Unknown pid:', valueToHex(pid, 2));
           continue;
         }
+        
+        if (payloadUnitStartIndicator && this.chunksMap[pid].length) {
+          const packet = new Uint8Array(this.chunksMap[pid].reduce((total, arr) => total + arr.length, 0));
+          const packetView = new DataView(packet.buffer);
+          this.chunksMap[pid].reduce((idx, chunk) => {
+            packet.set(chunk, idx);
+            return idx + chunk.length;
+          }, 0);
 
-        if (this.streamMap[pid] === StreamType.VIDEO_H264) {
-          if (payloadUnitStartIndicator && videoChunks.length) {
-            const packet = new Uint8Array(videoChunks.reduce((total, arr) => total + arr.length, 0));
-            const packetView = new DataView(packet.buffer);
-            videoChunks.reduce((idx, chunk) => {
-              packet.set(chunk, idx);
-              return idx + chunk.length;
-            }, 0);
-
-            if (packet[0] !== 0x00 || packet[1] !== 0x00 || packet[2] !== 0x01) {
-              console.log('Invalid packet start code (0x000001).');
-              continue;
-            }
-
-            // const streamId = packetView.getUint8(3);
-            // const packetLength = packetView.getUint16(4);
-            // const header = packetView.getUint16(6);
-            const headerLength = packetView.getUint8(8);
-            
-            const data = packet.slice(9 + headerLength);
-
-            if (this.videoInit && data[5] === 0x10) {
-              await this.videoDecoder.flush();
-            }
-            
-            this.videoDecoder.decode(new EncodedVideoChunk({
-              type: data[5] === 0x10 ? 'key' : 'delta',
-              timestamp: 0,
-              data,
-            }));
-
-            if (!this.videoInit)
-              this.videoInit = true;
-
-            videoChunks.length = 0;
+          if (packet[0] !== 0x00 || packet[1] !== 0x00 || packet[2] !== 0x01) {
+            console.log('Invalid packet start code (0x000001).');
+            continue;
           }
 
-          videoChunks.push(packet.slice(payloadStart));
+          // const streamId = packetView.getUint8(3);
+          // const packetLength = packetView.getUint16(4);
+          // const header = packetView.getUint16(6);
+          const headerLength = packetView.getUint8(8);
+          
+          const data = packet.slice(9 + headerLength);
 
-          continue;
+          switch (this.streamMap[pid]) {
+            case StreamType.VIDEO_H264: {
+              if (this.videoInit && data[5] === 0x10) {
+                await this.videoDecoder.flush();
+              }
+              
+              this.videoDecoder.decode(new EncodedVideoChunk({
+                type: data[5] === 0x10 ? 'key' : 'delta',
+                timestamp: 0,
+                data,
+              }));
+
+              if (!this.videoInit)
+                this.videoInit = true;
+              break;
+            }
+            case StreamType.AUDIO_PCM: {
+              if (pid !== 0x1100)
+                continue;
+              const pcmHeader = data.slice(0, 4);
+              const audio = data.slice(4);
+
+              const channelLayout = pcmHeader[2] >> 4;
+              const numOfChannels = channelLayout === ChannelLayouts.MONO
+                ? 1 : channelLayout === ChannelLayouts.STEREO
+                ? 2 : null;
+              if (!numOfChannels) {
+                console.error('Only mono and stereo currently supported.');
+                return;
+              }
+              const sampleRate = SAMPLE_RATES[pcmHeader[2] & 0x0F] ?? 0;
+              const bitsPerSample = BITS_PER_SAMPLE[pcmHeader[3] >> 6];
+              
+              if ((bitsPerSample !== 24 && bitsPerSample !== 16) || sampleRate === 0) {
+                console.error('PCM audio other than 16 or 24 bits not supported.');
+                return;
+              }
+              const byteCount = bitsPerSample / 8;
+
+              if (!this.bufferMap[pid]) {
+                const secondsSize = 10 * 60 * sampleRate * numOfChannels;
+                const buffer = this.audioContext.createBuffer(
+                  numOfChannels, secondsSize, sampleRate
+                );
+                
+                if (pid === 0x1100)
+                  this.sourceNode.buffer = buffer;
+
+                this.bufferMap[pid] = buffer;
+              }
+
+              if (!this.audioOffset[pid])
+                this.audioOffset[pid] = 0;
+
+              const channels = Array(numOfChannels)
+                .fill(new Float32Array(audio.length / byteCount / numOfChannels));
+
+              for (let idx = 0; idx < audio.length / byteCount; idx++) {
+                const rawVal = (
+                  audio[idx * byteCount] << ((byteCount - 2) ? 16 : 8)
+                ) | (
+                  audio[idx * byteCount + 1] << ((byteCount - 2) ? 8 : 0)
+                ) | ((byteCount - 2) ? audio[idx * 3 + 2] : 0);
+
+                const val = audio[idx * byteCount] & 0x80 ? rawVal - (
+                  (byteCount - 2) ? 0x1000000 : 0x10000
+                ) : rawVal;
+
+                channels[idx % 2][Math.floor(idx / 2)] = val / (
+                  Math.pow(2, bitsPerSample - 1) - Number(val >= 0)
+                );
+              }
+
+              channels.forEach((channel, i) => {
+                this.bufferMap[pid].copyToChannel(channel, i, this.audioOffset[pid]);
+              });
+
+              this.audioOffset[pid] += audio.length / byteCount / numOfChannels;
+              break;
+            }
+          }
+
+          this.chunksMap[pid].length = 0;
         }
 
-        // console.log(valueToHex(pid, 2));
+        this.chunksMap[pid].push(packet.slice(payloadStart));
       }
     }
+
+    console.log('done');
   }
 }
