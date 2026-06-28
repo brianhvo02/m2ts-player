@@ -1,20 +1,18 @@
 import { useRef } from 'react';
 import './App.css';
-import Demuxer from './Demuxer';
+import Player from './Player';
 
 export default function App() {
-  const demuxerRef = useRef<Demuxer>(null);
+  const playerRef = useRef<Player>(null);
 
   return (
     <main>
-      <canvas></canvas>
+      <canvas id='video'></canvas>
       <button onClick={async () => {
-        const decoder = await Demuxer.init();
-        demuxerRef.current = decoder;
-
-        if (decoder) decoder.demux();
+        const player = await Player.init();
+        playerRef.current = player;
       }}>Create</button>
-      <button onClick={() => demuxerRef.current?.play()}>Play</button>
+      <button onClick={() => playerRef.current?.play()}>Play</button>
     </main>
   )
 };

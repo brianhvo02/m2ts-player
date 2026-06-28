@@ -1,3 +1,5 @@
+import * as Comlink from 'comlink';
+
 const PACKET_COUNT = Math.floor(2**30 / 192);
 const PACKET_SIZE = PACKET_COUNT * 192;
 
@@ -28,112 +30,53 @@ const valueToHex = function(value: number, byteCount: number) {
   return '0x' + value.toString(16).padStart(byteCount * 2, '0').toUpperCase();
 }
 
-export default class Demuxer {
+export class Demuxer extends EventTarget {
   private pmtPid = 0x0000;
   private nitPid = 0x0000;
   private pcrPid = 0x0000;
   private streams: Set<number> = new Set();
   private streamMap: Record<number, StreamType> = {};
   private chunksMap: Record<number, Uint8Array<ArrayBuffer>[]> = {};
-  private bufferMap: Record<number, AudioBuffer> = {};
+  private buffersCreated: Record<number, boolean> = {};
   private audioOffset: Record<number, number> = {};
-  private frames: VideoFrame[] = [];
-  private frameCount = 0;
 
   private videoInit = false;
   private videoConf = false;
-  private videoResize = false;
 
-  file: File;
-  videoDecoder: VideoDecoder;
-  audioContext: AudioContext;
-  sourceNode: AudioBufferSourceNode;
-
-  startTime: number | null = null;
-  animationId: number | null = null;
-
-  static async init() {
-    const file = await new Promise<File | null>(resolve => {
-      const input = document.createElement('input');
-      input.type = 'file';
-      input.addEventListener('change', () => resolve(input.files?.[0] ?? null));
-      input.addEventListener('cancel', () => resolve(null));
-      input.click();
-    });
-
-    return file ? new this(file) : file;
-  }
+  private file: File;
 
   constructor(file: File) {
+    super();
+
     this.file = file;
-
-    this.videoDecoder = new VideoDecoder({
-      output: (frame) => {
-        this.frames.push(frame);
-        // frame.close();
-      },
-      error(e) {
-        console.error(e);
-      },
-    });
-
-    this.audioContext = new AudioContext();
-    this.sourceNode = this.audioContext.createBufferSource();
-    this.sourceNode.connect(this.audioContext.destination);
   }
 
-  stop() {
-    if (this.animationId)
-      cancelAnimationFrame(this.animationId);
-    if (this.startTime)
-      this.sourceNode.stop();
+  // stop() {
+  //   if (this.animationId)
+  //     cancelAnimationFrame(this.animationId);
+  //   if (this.startTime)
+  //     this.sourceNode.stop();
 
-    this.animationId = null;
-    this.startTime = null;
-  }
+  //   this.animationId = null;
+  //   this.startTime = null;
+  // }
 
-  async animate() {
-    const canvas = document.querySelector('canvas');
-    const ctx = canvas?.getContext('2d');
-    if (!canvas || !ctx) return;
-
-    if (!this.animationId)
-      return;
-    if (!this.startTime)
-      return cancelAnimationFrame(this.animationId);
-
-    const time = this.audioContext.currentTime - this.startTime;
-
-    while (time * 24000/1001 > this.frameCount) {
-      const frame = this.frames.shift();
-      if (!frame) break;
-
-      if (!this.videoResize) {
-        canvas.width = frame.codedWidth;
-        canvas.height = frame.codedHeight;
-        this.videoResize = true;
-      }
-      ctx.drawImage(frame, 0, 0);
-
-      frame.close();
-      this.frameCount++;
-    }
-
-    this.animationId = requestAnimationFrame(() => this.animate());
-  }
-
-  play() {
-    this.sourceNode.start();
-    this.startTime = this.audioContext.currentTime;
-    this.animationId = requestAnimationFrame(() => this.animate());
-  }
-
-  async demux() {
+  async demux(
+    configure: Comlink.Local<(codec: string) => void>,
+    flush: Comlink.Local<() => void>,
+    decode: Comlink.Local<(chunk: EncodedVideoChunk) => void>,
+    createBuffer: Comlink.Local<(
+      pid: number, sampleRate: number, numOfChannels: number
+    ) => boolean>,
+    addToBuffer: Comlink.Local<(
+      pid: number, channels: Float32Array<ArrayBuffer>[], audioOffset: number
+    ) => void>,
+  ) {
     const maxCount = Math.ceil(this.file.size / PACKET_SIZE);
     for (let j = 0; j < maxCount; j++) {
       const progress: Record<number, boolean> = {};
       const buf = await this.file.slice(j * PACKET_SIZE, (j + 1) * PACKET_SIZE).arrayBuffer();
-      console.log(`Loading complete: ${j}/${maxCount}`);
+      console.log(`Loading complete: ${j + 1}/${maxCount}`);
       
       const maxPacket = j === maxCount - 1
         ? buf.byteLength / 192
@@ -292,11 +235,11 @@ export default class Demuxer {
                 this.streams.add(elementaryPid);
 
                 if (streamType === StreamType.VIDEO_H264 && !this.videoConf) {
-                  this.videoDecoder.configure({ codec: 'avc1.640029' });
+                  await configure('avc1.640029');
                   this.videoConf = true;
                 }
                 if (streamType === StreamType.VIDEO_H265 && !this.videoConf) {
-                  this.videoDecoder.configure({ codec: 'hvc1.1.6.L186.B0' });
+                  await configure('hvc1.1.6.L186.B0');
                   this.videoConf = true;
                 }
                 
@@ -353,11 +296,10 @@ export default class Demuxer {
 
           switch (this.streamMap[pid]) {
             case StreamType.VIDEO_H264: {
-              if (this.videoInit && data[5] === 0x10) {
-                await this.videoDecoder.flush();
-              }
+              if (this.videoInit && data[5] === 0x10)
+                await flush();
               
-              this.videoDecoder.decode(new EncodedVideoChunk({
+              await decode(new EncodedVideoChunk({
                 type: data[5] === 0x10 ? 'key' : 'delta',
                 timestamp,
                 data,
@@ -368,6 +310,9 @@ export default class Demuxer {
               break;
             }
             case StreamType.AUDIO_PCM: {
+              if (pid !== 0x1100)
+                continue;
+
               const pcmHeader = data.slice(0, 4);
               const audio = data.slice(4);
 
@@ -388,23 +333,17 @@ export default class Demuxer {
               }
               const byteCount = bitsPerSample / 8;
 
-              if (!this.bufferMap[pid]) {
-                const secondsSize = 10 * 60 * sampleRate * numOfChannels;
-                const buffer = this.audioContext.createBuffer(
-                  numOfChannels, secondsSize, sampleRate
-                );
-                
-                if (!Object.keys(this.bufferMap).length)
-                  this.sourceNode.buffer = buffer;
-
-                this.bufferMap[pid] = buffer;
-              }
+              this.buffersCreated[pid] = await createBuffer(
+                pid, sampleRate, numOfChannels
+              );
 
               if (!this.audioOffset[pid])
                 this.audioOffset[pid] = 0;
 
-              const channels = Array(numOfChannels)
-                .fill(new Float32Array(audio.length / byteCount / numOfChannels));
+              const channels = [...Array<Float32Array<ArrayBuffer>>(numOfChannels)]
+                .map(() => new Float32Array(
+                  audio.length / byteCount / numOfChannels
+                ));
 
               for (let idx = 0; idx < audio.length / byteCount; idx++) {
                 const rawVal = (
@@ -422,9 +361,11 @@ export default class Demuxer {
                 );
               }
 
-              channels.forEach((channel, i) => {
-                this.bufferMap[pid].copyToChannel(channel, i, this.audioOffset[pid]);
-              });
+              await addToBuffer(
+                pid, 
+                Comlink.transfer(channels, channels.map(c => c.buffer)), 
+                this.audioOffset[pid],
+              );
 
               this.audioOffset[pid] += audio.length / byteCount / numOfChannels;
               break;
@@ -441,3 +382,5 @@ export default class Demuxer {
     console.log('done');
   }
 }
+
+Comlink.expose(Demuxer);
