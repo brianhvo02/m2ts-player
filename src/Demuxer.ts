@@ -128,12 +128,12 @@ export default class Demuxer {
     this.animationId = requestAnimationFrame(() => this.animate());
   }
 
-  async decode() {
+  async demux() {
     const maxCount = Math.ceil(this.file.size / PACKET_SIZE);
     for (let j = 0; j < maxCount; j++) {
       const progress: Record<number, boolean> = {};
       const buf = await this.file.slice(j * PACKET_SIZE, (j + 1) * PACKET_SIZE).arrayBuffer();
-      console.log('Load complete.', j);
+      console.log(`Loading complete: ${j}/${maxCount}`);
       
       const maxPacket = j === maxCount - 1
         ? buf.byteLength / 192
@@ -143,7 +143,7 @@ export default class Demuxer {
         const percent = Math.floor(i / maxPacket * 100);
         if (percent % 10 === 0 && !progress[percent]) {
           progress[percent] = true;
-          console.log(percent);
+          console.log(`${percent}% demuxed.`);
         }
 
         const packet = new Uint8Array(buf.slice(i * 192, (i + 1) * 192));

@@ -12,7 +12,7 @@ export default function App() {
         const decoder = await Demuxer.init();
         demuxerRef.current = decoder;
 
-        if (decoder) decoder.decode();
+        if (decoder) decoder.demux();
       }}>Create</button>
       <button onClick={() => demuxerRef.current?.play()}>Play</button>
     </main>
