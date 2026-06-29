@@ -77,12 +77,21 @@ export class Demuxer extends EventTarget {
     // const packetLength = packetView.getUint16(4);
     const header = packetView.getUint16(6);
     const ptsDtsIndicator = (header & 0xC0) >> 6;
+    const pts = Boolean(ptsDtsIndicator & 0b10);
+    // const dts = Boolean(ptsDtsIndicator & 0b01);
     const headerLength = packetView.getUint8(8);
-    const timestamp = ptsDtsIndicator ? Number(
+    
+    const timestamp = pts ? Number(
       (BigInt(packet[9]) & 0x0En) << 30n |
       (BigInt(packetView.getUint16(10)) & 0xFFFEn) << 15n |
       (BigInt(packetView.getUint16(12)) & 0xFFFEn)
     ) : null;
+    
+    // const dtsTimestamp = dts ? Number(
+    //   (BigInt(packet[14]) & 0x0En) << 30n |
+    //   (BigInt(packetView.getUint16(15)) & 0xFFFEn) << 15n |
+    //   (BigInt(packetView.getUint16(17)) & 0xFFFEn)
+    // ) : null;
 
     if (!timestamp) {
       console.error('No PTS in PES packet.');
@@ -97,11 +106,13 @@ export class Demuxer extends EventTarget {
         if (this.videoInit && data[5] === 0x10)
           await flush();
         
-        await decode(new EncodedVideoChunk({
-          type: data[5] === 0x10 ? 'key' : 'delta',
-          timestamp,
-          data,
-        }));
+        try {
+          await decode(new EncodedVideoChunk({
+            type: data[5] === 0x10 ? 'key' : 'delta',
+            timestamp,
+            data,
+          }));
+        } catch (e) {}
 
         if (!this.videoInit)
           this.videoInit = true;
@@ -117,7 +128,7 @@ export class Demuxer extends EventTarget {
           ? 1 : channelLayout === ChannelLayouts.STEREO
           ? 2 : null;
         if (!numOfChannels) {
-          console.error('Only mono and stereo currently supported.');
+          console.error('Only mono and stereo PCM currently supported.');
           return;
         }
         const sampleRate = SAMPLE_RATES[pcmHeader[2] & 0x0F] ?? 0;
@@ -165,7 +176,7 @@ export class Demuxer extends EventTarget {
           Math.round(audioOffset * sampleRate),
         );
 
-        if (audioOffset >= 0.5)
+        if (audioOffset >= 0.2)
           await play();
         break;
       }
