@@ -48,8 +48,8 @@ export default class Player {
       Comlink.proxy(() => videoRenderer.flush()),
       Comlink.proxy((chunk: EncodedVideoChunk) => videoRenderer.decode(chunk)),
       Comlink.proxy((
-        pid: number, sampleRate: number, numOfChannels: number
-      ) => audioRenderer.createBuffer(pid, sampleRate, numOfChannels)),
+        pid: number, sampleRate: number, numOfChannels: number, seconds: number
+      ) => audioRenderer.createBuffer(pid, sampleRate, numOfChannels, seconds)),
       Comlink.proxy((
         pid: number, channels: Float32Array<ArrayBuffer>[], audioOffset: number
       ) => audioRenderer.addToBuffer(pid, channels, audioOffset)),
@@ -73,5 +73,9 @@ export default class Player {
 
   play() {
     this.clock.play();
+  }
+  
+  pause() {
+    this.clock.pause();
   }
 }

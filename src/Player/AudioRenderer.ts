@@ -3,8 +3,12 @@ export default class AudioRenderer {
   private sourceNode: AudioBufferSourceNode;
 
   private startTime: number | null = null;
+  private pauseTime: number | null = null;
 
+  private currentPid = 0x0000;
   private bufferMap: Record<number, AudioBuffer> = {};
+
+  isPlaying = false;
 
   constructor() {
     this.audioContext = new AudioContext();
@@ -12,14 +16,16 @@ export default class AudioRenderer {
     this.sourceNode.connect(this.audioContext.destination);
   }
 
-  createBuffer(pid: number, sampleRate: number, numOfChannels: number) {
-    const secondsSize = 10 * 60 * sampleRate * numOfChannels;
+  createBuffer(pid: number, sampleRate: number, numOfChannels: number, seconds: number) {
+    const length = seconds * sampleRate * numOfChannels;
     const buffer = this.audioContext.createBuffer(
-      numOfChannels, secondsSize, sampleRate
+      numOfChannels, length, sampleRate
     );
     
-    if (!Object.keys(this.bufferMap).length)
+    if (!Object.keys(this.bufferMap).length) {
       this.sourceNode.buffer = buffer;
+      this.currentPid = pid;
+    }
 
     this.bufferMap[pid] = buffer;
 
@@ -35,11 +41,28 @@ export default class AudioRenderer {
   }
 
   play() {
-    this.sourceNode.start();
-    this.startTime = this.audioContext.currentTime;
+    if (this.isPlaying)
+      return;
+    this.isPlaying = true;
+    if (this.startTime && this.pauseTime) {
+      const elapsedTime = this.pauseTime - this.startTime;
+      this.sourceNode = this.audioContext.createBufferSource();
+      this.sourceNode.connect(this.audioContext.destination);
+      this.sourceNode.buffer = this.bufferMap[this.currentPid];
+      this.sourceNode.start(0, elapsedTime);
+      this.startTime = this.audioContext.currentTime - elapsedTime;
+      this.pauseTime = null;
+    } else {
+      this.sourceNode.start();
+      this.startTime = this.audioContext.currentTime;
+    }
   }
 
   pause() {
+    if (!this.isPlaying)
+      return;
+    this.isPlaying = false;
+    this.pauseTime = this.audioContext.currentTime;
     this.sourceNode.stop();
   }
 
@@ -49,6 +72,7 @@ export default class AudioRenderer {
   }
 
   changeAudioTrack(pid: number) {
+    this.currentPid = pid;
     this.sourceNode.stop();
     this.sourceNode = this.audioContext.createBufferSource();
     this.sourceNode.connect(this.audioContext.destination);

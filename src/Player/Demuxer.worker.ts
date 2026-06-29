@@ -35,7 +35,8 @@ export class Demuxer extends EventTarget {
   private streamMap: Record<number, StreamType> = {};
   private chunksMap: Record<number, Uint8Array<ArrayBuffer>[]> = {};
   private buffersCreated: Record<number, boolean> = {};
-  private audioOffset: Record<number, number> = {};
+  private initialTimestamp = 0;
+  private finalTimestamp = 0;
 
   private videoInit = false;
   private videoConf = false;
@@ -53,7 +54,7 @@ export class Demuxer extends EventTarget {
     flush: Comlink.Local<() => void>,
     decode: Comlink.Local<(chunk: EncodedVideoChunk) => void>,
     createBuffer: Comlink.Local<(
-      pid: number, sampleRate: number, numOfChannels: number
+      pid: number, sampleRate: number, numOfChannels: number, seconds: number
     ) => boolean>,
     addToBuffer: Comlink.Local<(
       pid: number, channels: Float32Array<ArrayBuffer>[], audioOffset: number
@@ -130,12 +131,10 @@ export class Demuxer extends EventTarget {
 
         if (!this.buffersCreated[pid]) {
           this.buffersCreated[pid] = await createBuffer(
-            pid, sampleRate, numOfChannels
+            pid, sampleRate, numOfChannels, 
+            (this.finalTimestamp - this.initialTimestamp) / 180000,
           );
         }
-
-        if (!this.audioOffset[pid])
-          this.audioOffset[pid] = 0;
 
         const channels = [...Array<Float32Array<ArrayBuffer>>(numOfChannels)]
           .map(() => new Float32Array(
@@ -158,15 +157,15 @@ export class Demuxer extends EventTarget {
           );
         }
 
+        const audioOffset = (timestamp - this.initialTimestamp) / 180000;
+
         await addToBuffer(
           pid, 
           Comlink.transfer(channels, channels.map(c => c.buffer)), 
-          this.audioOffset[pid],
+          Math.round(audioOffset * sampleRate),
         );
 
-        this.audioOffset[pid] += audio.length / byteCount / numOfChannels;
-
-        if (this.audioOffset[pid] / sampleRate >= 1)
+        if (audioOffset >= 0.5)
           await play();
         break;
       }
@@ -180,16 +179,16 @@ export class Demuxer extends EventTarget {
     flush: Comlink.Local<() => void>,
     decode: Comlink.Local<(chunk: EncodedVideoChunk) => void>,
     createBuffer: Comlink.Local<(
-      pid: number, sampleRate: number, numOfChannels: number
+      pid: number, sampleRate: number, numOfChannels: number, seconds: number
     ) => boolean>,
     addToBuffer: Comlink.Local<(
       pid: number, channels: Float32Array<ArrayBuffer>[], audioOffset: number
     ) => void>,
     play: Comlink.Local<() => void>,
   ) {
-    const reader = this.file.stream().getReader();
+    let reader = this.file.stream().getReader();
     let leftovers = new Uint8Array();
-    
+
     while (true) {
       const { done, value } = await reader.read();
 
@@ -201,74 +200,29 @@ export class Demuxer extends EventTarget {
       currentData.set(value, leftovers.length);
       const numPackets = Math.floor(currentData.length / 192);
       for (let i = 0; i < numPackets; i++) {
-        // const maxCount = Math.ceil(this.file.size / PACKET_SIZE);
-        // for (let j = 0; j < maxCount; j++) {
-        //   const progress: Record<number, boolean> = {};
-        //   const buf = await this.file.slice(j * PACKET_SIZE, (j + 1) * PACKET_SIZE).arrayBuffer();
-        //   console.log(`Loading complete: ${j + 1}/${maxCount}`);
-          
-        //   const maxPacket = j === maxCount - 1
-        //     ? buf.byteLength / 192
-        //     : PACKET_COUNT;
-
-        //   for (let i = 0; i < maxPacket; i++) {
-        //     const percent = Math.floor(i / maxPacket * 100);
-        //     if (percent % 10 === 0 && !progress[percent]) {
-        //       progress[percent] = true;
-        //       console.log(`${percent}% demuxed.`);
-        //     }
-
         const packet = new Uint8Array(currentData.buffer.slice(i * 192, (i + 1) * 192));
         const view = new DataView(packet.buffer);
 
-        // const extraHeader = view.getUint32(0);
         const syncByte = view.getUint8(4);
 
         if (syncByte !== 0x47)
           console.error('Packet not in sync.');
 
         const valIdx5 = view.getUint16(5);
-        // const transportErrorIndicator = Boolean(valIdx5 & 0x8000);
         const payloadUnitStartIndicator = Boolean(valIdx5 & 0x4000);
-        // const transportPriority = Boolean(valIdx5 & 0x2000);
         const pid = valIdx5 & 0x1FFF;
 
         const valIdx7 = view.getUint8(7);
-        // const transportScramblingControl = (valIdx7 & 0xC0) >> 6;
         const adaptationFieldControl = (valIdx7 & 0x30) >> 4;
-        // const continuityCounter = valIdx7 & 0xF;
 
         const payloadStart = ((adaptationFieldControl & 0b10) ? view.getUint8(8) + 1 : 0) + 8;
-
-        if (adaptationFieldControl & 0b10) {
-            // const adaptationFieldLength = view.getUint8(8);
-            // const valIdx9 = view.getUint8(9);
-            // const discontinuityIndicator = Boolean(valIdx9 & 0x80);
-            // const randomAccessIndicator = Boolean(valIdx9 & 0x40);
-            // const elementaryStreamPriorityIndicator = Boolean(valIdx9 & 0x20);
-            // const pcrFlag = Boolean(valIdx9 & 0x10);
-            // const opcrFlag = Boolean(valIdx9 & 0x08);
-            // const splicingPointFlag = Boolean(valIdx9 & 0x04);
-            // const transportPrivateDataFlag = Boolean(valIdx9 & 0x02);
-            // const adaptationFieldExtensionFlag = Boolean(valIdx9 & 0x01);
-            // const valIdx10 = view.getBigUint64(10);
-            // if (opcrFlag || splicingPointFlag || transportPrivateDataFlag || adaptationFieldExtensionFlag)
-            //     console.log('hey!', pcrFlag, opcrFlag, splicingPointFlag, transportPrivateDataFlag, adaptationFieldExtensionFlag)
-            // const pcrRaw = (valIdx10 & 0xFFFFFFFFFFFF0000n) >> 16n;
-            // const pcrBase = (valIdx10 & 0xFFFFFF8000000000n) >> 39n;
-            // const pcrReserved = (valIdx10 & 0x000000007E000000n) >> 34n;
-            // const pcrExtension = (valIdx10 & 0x0000000001FF0000n) >> 16n;
-            // const pcr = pcrBase * 300n + pcrExtension;
-            
-            // if (pid === this.pcrPid) {
-            //   console.log(pcr)
-            // }
-        }
 
         if (!(adaptationFieldControl & 0b01)) 
           continue;
 
         if (pid === 0x0000 || pid === this.pmtPid) {
+          if (this.streams.size) continue;
+          
           if (!payloadUnitStartIndicator) {
             console.error('Additional table data handling not implemented.');
             continue;
@@ -280,28 +234,17 @@ export class Demuxer extends EventTarget {
           const tableId = payloadView.getUint8(0);
           const valIdx1 = payloadView.getUint16(1);
           const sectionSyntaxIndicator = Boolean(valIdx1 & 0x8000);
-          // const privateBit = Boolean(valIdx1 & 0x4000);
           const reservedPsi = (valIdx1 & 0x3000) >> 12;
           if (reservedPsi !== 0x03)
             console.error('Invalid reserved bits.');
           const sectionLength = (valIdx1 & 0x03FF);
 
-          // const tableIdExtension = sectionSyntaxIndicator ? 
-          //     payloadView.getUint16(3) : null;
           const valIdx5 = sectionSyntaxIndicator ? 
             payloadView.getUint8(5) : null;
           const reservedExt = valIdx5 ?
             (valIdx5 & 0xC0) >> 6 : null;
           if (!(reservedExt === null || reservedExt === 0x03))
             console.error('Invalid reserved bits.');
-          // const versionNumber = valIdx5 ?
-          //     (valIdx5 & 0x3E) >> 1 : null;
-          // const currentNextIndicator = valIdx5 ?
-          //     valIdx5 & 0x01 : null;
-          // const sectionNumber = sectionSyntaxIndicator ? 
-          //     payloadView.getUint8(6) : null;
-          // const lastSectionNumber = sectionSyntaxIndicator ? 
-          //     payloadView.getUint8(7) : null;
 
           const dataIdx = Number(sectionSyntaxIndicator) * 5 + 3;
           switch (tableId) {
@@ -345,9 +288,7 @@ export class Demuxer extends EventTarget {
               let infoRead = 0;
               while (infoRead < programInfoLength) {
                 const idx = dataIdx + 4 + infoRead;
-                // const descriptorTag = payloadView.getUint8(idx);
                 const descriptorLength = payloadView.getUint8(idx + 1);
-                // const descriptorData = payload.slice(idx + 2, idx + 2 + descriptorLength);
                 infoRead += 2 + descriptorLength;
               }
 
@@ -380,12 +321,80 @@ export class Demuxer extends EventTarget {
               break;
             }
           }
-          
-          // const crc32 = payload.slice(sectionLength - 4, sectionLength);
           continue;
         }
 
         if (pid === this.nitPid || pid === this.pcrPid || pid === 0x1FFF) // Null packet
+          continue;
+
+        if (!this.streams.has(pid)) {
+          console.error('Unknown pid:', valueToHex(pid, 2));
+          continue;
+        }
+
+        if (payloadUnitStartIndicator) {
+          const pesPacket = packet.slice(payloadStart);
+          const pesPacketView = new DataView(pesPacket.buffer);
+
+          if (pesPacket[0] !== 0x00 || pesPacket[1] !== 0x00 || pesPacket[2] !== 0x01) {
+            console.log('Invalid packet start code (0x000001).');
+            return;
+          }
+
+          const header = pesPacketView.getUint16(6);
+          const ptsDtsIndicator = (header & 0xC0) >> 6;
+          const timestamp = ptsDtsIndicator ? Number(
+            (BigInt(packet[9]) & 0x0En) << 30n |
+            (BigInt(pesPacketView.getUint16(10)) & 0xFFFEn) << 15n |
+            (BigInt(pesPacketView.getUint16(12)) & 0xFFFEn)
+          ) : null;
+
+          if (!timestamp) {
+            console.error('No PTS in PES packet. PID:', valueToHex(pid, 2));
+            continue;
+          }
+          
+          if (!this.initialTimestamp)
+            this.initialTimestamp = timestamp;
+
+          this.finalTimestamp = timestamp;
+        }
+
+        leftovers = currentData.slice(numPackets * 192);
+      }
+    }
+    
+    reader = this.file.stream().getReader();
+    leftovers = new Uint8Array();
+    while (true) {
+      const { done, value } = await reader.read();
+
+      if (done)
+        break;
+
+      const currentData = new Uint8Array(leftovers.length + value.length);
+      currentData.set(leftovers);
+      currentData.set(value, leftovers.length);
+      const numPackets = Math.floor(currentData.length / 192);
+      for (let i = 0; i < numPackets; i++) {
+        const packet = new Uint8Array(currentData.buffer.slice(i * 192, (i + 1) * 192));
+        const view = new DataView(packet.buffer);
+
+        const syncByte = view.getUint8(4);
+
+        if (syncByte !== 0x47)
+          console.error('Packet not in sync.');
+
+        const valIdx5 = view.getUint16(5);
+        const payloadUnitStartIndicator = Boolean(valIdx5 & 0x4000);
+        const pid = valIdx5 & 0x1FFF;
+
+        const valIdx7 = view.getUint8(7);
+        const adaptationFieldControl = (valIdx7 & 0x30) >> 4;
+
+        const payloadStart = ((adaptationFieldControl & 0b10) ? view.getUint8(8) + 1 : 0) + 8;
+
+        if (pid === 0x0000 || pid === this.pmtPid || pid === this.nitPid || pid === this.pcrPid || pid === 0x1FFF) // Null packet
           continue;
 
         if (!this.streams.has(pid)) {
