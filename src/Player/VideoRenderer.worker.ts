@@ -3,7 +3,7 @@ import * as Comlink from 'comlink';
 export class VideoRenderer extends EventTarget {
   private frames: VideoFrame[] = [];
   private videoResize = false;
-  private frameCount = 0;
+  private initialTimestamp?: number;
   
   lastRenderedTime: number = 0;
 
@@ -13,21 +13,25 @@ export class VideoRenderer extends EventTarget {
   animationId: number | null = null;
 
   async render(time: number) {
-    if (!this.frames.length) return;
+    if (!this.frames[0]) return;
 
-    while (time * 24000/1001 > this.frameCount) {
+    if (!this.initialTimestamp)
+      this.initialTimestamp = this.frames[0].timestamp;
+
+    while ((this.frames[0].timestamp - this.initialTimestamp) / 180000 < time) {
       const frame = this.frames.shift();
-      if (!frame) break;
+      if (!frame) return;
 
       if (!this.videoResize) {
         this.canvas.width = frame.codedWidth;
         this.canvas.height = frame.codedHeight;
         this.videoResize = true;
       }
+  
       this.ctx.drawImage(frame, 0, 0);
-
       frame.close();
-      this.frameCount++;
+
+      if (!this.frames[0]) return;
     }
   }
 

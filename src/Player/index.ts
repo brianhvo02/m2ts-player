@@ -1,21 +1,15 @@
 import * as Comlink from 'comlink';
-import type { Demuxer } from './Demuxer';
-import type { VideoRenderer } from './VideoRenderer';
+import type { Demuxer } from './Demuxer.worker';
+import type { VideoRenderer } from './VideoRenderer.worker';
 import AudioRenderer from './AudioRenderer';
-import type { Clock } from './Clock';
-import DemuxerWorker from './Demuxer?worker';
-import VideoRendererWorker from './VideoRenderer?worker';
-import ClockWorker from './Clock?worker';
+import type { Clock } from './Clock.worker';
+import DemuxerWorker from './Demuxer.worker?worker';
+import VideoRendererWorker from './VideoRenderer.worker?worker';
+import ClockWorker from './Clock.worker?worker';
 
 const DemuxerLink = Comlink.wrap<typeof Demuxer>(new DemuxerWorker());
 const VideoRendererLink = Comlink.wrap<typeof VideoRenderer>(new VideoRendererWorker());
 const ClockLink = Comlink.wrap<typeof Clock>(new ClockWorker());
-
-Comlink.transferHandlers.set('EVENT', {
-  canHandle: (obj) => obj instanceof Event,
-  serialize: (ev: CustomEvent) => [ { detail: ev.detail }, [ev.detail] ],
-  deserialize: (obj) => obj,
-});
 
 export default class Player {
   demuxer: Comlink.Remote<Demuxer>;

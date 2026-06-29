@@ -51,16 +51,6 @@ export class Demuxer extends EventTarget {
     this.file = file;
   }
 
-  // stop() {
-  //   if (this.animationId)
-  //     cancelAnimationFrame(this.animationId);
-  //   if (this.startTime)
-  //     this.sourceNode.stop();
-
-  //   this.animationId = null;
-  //   this.startTime = null;
-  // }
-
   async demux(
     configure: Comlink.Local<(codec: string) => void>,
     flush: Comlink.Local<() => void>,
@@ -72,6 +62,10 @@ export class Demuxer extends EventTarget {
       pid: number, channels: Float32Array<ArrayBuffer>[], audioOffset: number
     ) => void>,
   ) {
+    // const opfs = await navigator.storage.getDirectory();
+    // const fh = await opfs.getFileHandle('test.raw', { create: true });
+    // const ws = await fh.createWritable();
+
     const maxCount = Math.ceil(this.file.size / PACKET_SIZE);
     for (let j = 0; j < maxCount; j++) {
       const progress: Record<number, boolean> = {};
@@ -198,6 +192,7 @@ export class Demuxer extends EventTarget {
 
               break;
             }
+            
             case 2: {
               // console.log('Detected PMT.');
               const valIdx0 = payloadView.getUint16(dataIdx);
@@ -296,6 +291,7 @@ export class Demuxer extends EventTarget {
 
           switch (this.streamMap[pid]) {
             case StreamType.VIDEO_H264: {
+              // console.log('video', timestamp)
               if (this.videoInit && data[5] === 0x10)
                 await flush();
               
@@ -310,9 +306,7 @@ export class Demuxer extends EventTarget {
               break;
             }
             case StreamType.AUDIO_PCM: {
-              if (pid !== 0x1100)
-                continue;
-
+              // console.log('audio', timestamp)
               const pcmHeader = data.slice(0, 4);
               const audio = data.slice(4);
 
@@ -333,9 +327,11 @@ export class Demuxer extends EventTarget {
               }
               const byteCount = bitsPerSample / 8;
 
-              this.buffersCreated[pid] = await createBuffer(
-                pid, sampleRate, numOfChannels
-              );
+              if (!this.buffersCreated[pid]) {
+                this.buffersCreated[pid] = await createBuffer(
+                  pid, sampleRate, numOfChannels
+                );
+              }
 
               if (!this.audioOffset[pid])
                 this.audioOffset[pid] = 0;
@@ -361,6 +357,8 @@ export class Demuxer extends EventTarget {
                 );
               }
 
+              // await ws.write(channels[0]);
+
               await addToBuffer(
                 pid, 
                 Comlink.transfer(channels, channels.map(c => c.buffer)), 
@@ -379,6 +377,7 @@ export class Demuxer extends EventTarget {
       }
     }
 
+    // await ws.close();
     console.log('done');
   }
 }
