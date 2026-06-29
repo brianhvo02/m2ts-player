@@ -28,6 +28,8 @@ export default class Player {
 
     if (!file) return null;
 
+    console.log('Selected file:', file.name);
+
     const canvasEl = document.getElementById('video') as HTMLCanvasElement;
     const canvas = canvasEl.transferControlToOffscreen();
 

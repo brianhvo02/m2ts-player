@@ -1,8 +1,5 @@
 import * as Comlink from 'comlink';
 
-const PACKET_COUNT = Math.floor(2**30 / 192);
-const PACKET_SIZE = PACKET_COUNT * 192;
-
 enum StreamType {
   VIDEO_H264 = 0x1B,
   VIDEO_H265 = 0x24,
@@ -161,8 +158,6 @@ export class Demuxer extends EventTarget {
           );
         }
 
-        // await ws.write(channels[0]);
-
         await addToBuffer(
           pid, 
           Comlink.transfer(channels, channels.map(c => c.buffer)), 
@@ -192,28 +187,38 @@ export class Demuxer extends EventTarget {
     ) => void>,
     play: Comlink.Local<() => void>,
   ) {
-    // const opfs = await navigator.storage.getDirectory();
-    // const fh = await opfs.getFileHandle('test.raw', { create: true });
-    // const ws = await fh.createWritable();
+    const reader = this.file.stream().getReader();
+    let leftovers = new Uint8Array();
+    
+    while (true) {
+      const { done, value } = await reader.read();
 
-    const maxCount = Math.ceil(this.file.size / PACKET_SIZE);
-    for (let j = 0; j < maxCount; j++) {
-      const progress: Record<number, boolean> = {};
-      const buf = await this.file.slice(j * PACKET_SIZE, (j + 1) * PACKET_SIZE).arrayBuffer();
-      console.log(`Loading complete: ${j + 1}/${maxCount}`);
-      
-      const maxPacket = j === maxCount - 1
-        ? buf.byteLength / 192
-        : PACKET_COUNT;
+      if (done)
+        break;
 
-      for (let i = 0; i < maxPacket; i++) {
-        const percent = Math.floor(i / maxPacket * 100);
-        if (percent % 10 === 0 && !progress[percent]) {
-          progress[percent] = true;
-          console.log(`${percent}% demuxed.`);
-        }
+      const currentData = new Uint8Array(leftovers.length + value.length);
+      currentData.set(leftovers);
+      currentData.set(value, leftovers.length);
+      const numPackets = Math.floor(currentData.length / 192);
+      for (let i = 0; i < numPackets; i++) {
+        // const maxCount = Math.ceil(this.file.size / PACKET_SIZE);
+        // for (let j = 0; j < maxCount; j++) {
+        //   const progress: Record<number, boolean> = {};
+        //   const buf = await this.file.slice(j * PACKET_SIZE, (j + 1) * PACKET_SIZE).arrayBuffer();
+        //   console.log(`Loading complete: ${j + 1}/${maxCount}`);
+          
+        //   const maxPacket = j === maxCount - 1
+        //     ? buf.byteLength / 192
+        //     : PACKET_COUNT;
 
-        const packet = new Uint8Array(buf.slice(i * 192, (i + 1) * 192));
+        //   for (let i = 0; i < maxPacket; i++) {
+        //     const percent = Math.floor(i / maxPacket * 100);
+        //     if (percent % 10 === 0 && !progress[percent]) {
+        //       progress[percent] = true;
+        //       console.log(`${percent}% demuxed.`);
+        //     }
+
+        const packet = new Uint8Array(currentData.buffer.slice(i * 192, (i + 1) * 192));
         const view = new DataView(packet.buffer);
 
         // const extraHeader = view.getUint32(0);
@@ -394,15 +399,16 @@ export class Demuxer extends EventTarget {
 
         this.chunksMap[pid].push(packet.slice(payloadStart));
       }
+
+      leftovers = currentData.slice(numPackets * 192);
     }
-    
+
     for (const spid of Object.keys(this.chunksMap)) {
       const pid = parseInt(spid);
       if (this.chunksMap[pid].length)
         await this.parsePacket(pid, flush, decode, createBuffer, addToBuffer, play);
     }
 
-    // await ws.close();
     console.log('done');
   }
 }
