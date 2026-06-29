@@ -47,4 +47,12 @@ export default class AudioRenderer {
     if (!this.startTime) return 0;
     return this.audioContext.currentTime - this.startTime;
   }
+
+  changeAudioTrack(pid: number) {
+    this.sourceNode.stop();
+    this.sourceNode = this.audioContext.createBufferSource();
+    this.sourceNode.connect(this.audioContext.destination);
+    this.sourceNode.buffer = this.bufferMap[pid];
+    this.sourceNode.start(0, this.getCurrentTime());
+  }
 }

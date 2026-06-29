@@ -51,6 +51,7 @@ export default class Player {
       Comlink.proxy((
         pid: number, channels: Float32Array<ArrayBuffer>[], audioOffset: number
       ) => audioRenderer.addToBuffer(pid, channels, audioOffset)),
+      Comlink.proxy(() => clock.play()),
     );
 
     return new this(demuxer, videoRenderer, audioRenderer, clock);

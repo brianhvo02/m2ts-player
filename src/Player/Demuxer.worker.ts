@@ -51,6 +51,135 @@ export class Demuxer extends EventTarget {
     this.file = file;
   }
 
+  async parsePacket(
+    pid: number,
+    flush: Comlink.Local<() => void>,
+    decode: Comlink.Local<(chunk: EncodedVideoChunk) => void>,
+    createBuffer: Comlink.Local<(
+      pid: number, sampleRate: number, numOfChannels: number
+    ) => boolean>,
+    addToBuffer: Comlink.Local<(
+      pid: number, channels: Float32Array<ArrayBuffer>[], audioOffset: number
+    ) => void>,
+    play: Comlink.Local<() => void>,
+  ) {
+    const packet = new Uint8Array(this.chunksMap[pid].reduce((total, arr) => total + arr.length, 0));
+    const packetView = new DataView(packet.buffer);
+    this.chunksMap[pid].reduce((idx, chunk) => {
+      packet.set(chunk, idx);
+      return idx + chunk.length;
+    }, 0);
+
+    if (packet[0] !== 0x00 || packet[1] !== 0x00 || packet[2] !== 0x01) {
+      console.log('Invalid packet start code (0x000001).');
+      return;
+    }
+
+    // const streamId = packetView.getUint8(3);
+    // const packetLength = packetView.getUint16(4);
+    const header = packetView.getUint16(6);
+    const ptsDtsIndicator = (header & 0xC0) >> 6;
+    const headerLength = packetView.getUint8(8);
+    const timestamp = ptsDtsIndicator ? Number(
+      (BigInt(packet[9]) & 0x0En) << 30n |
+      (BigInt(packetView.getUint16(10)) & 0xFFFEn) << 15n |
+      (BigInt(packetView.getUint16(12)) & 0xFFFEn)
+    ) : null;
+
+    if (!timestamp) {
+      console.error('No PTS in PES packet.');
+      return;
+    }
+
+    const data = packet.slice(9 + headerLength);
+
+    switch (this.streamMap[pid]) {
+      case StreamType.VIDEO_H264: {
+        // console.log('video', timestamp)
+        if (this.videoInit && data[5] === 0x10)
+          await flush();
+        
+        await decode(new EncodedVideoChunk({
+          type: data[5] === 0x10 ? 'key' : 'delta',
+          timestamp,
+          data,
+        }));
+
+        if (!this.videoInit)
+          this.videoInit = true;
+        break;
+      }
+      case StreamType.AUDIO_PCM: {
+        // console.log('audio', timestamp)
+        const pcmHeader = data.slice(0, 4);
+        const audio = data.slice(4);
+
+        const channelLayout = pcmHeader[2] >> 4;
+        const numOfChannels = channelLayout === ChannelLayouts.MONO
+          ? 1 : channelLayout === ChannelLayouts.STEREO
+          ? 2 : null;
+        if (!numOfChannels) {
+          console.error('Only mono and stereo currently supported.');
+          return;
+        }
+        const sampleRate = SAMPLE_RATES[pcmHeader[2] & 0x0F] ?? 0;
+        const bitsPerSample = BITS_PER_SAMPLE[pcmHeader[3] >> 6];
+        
+        if ((bitsPerSample !== 24 && bitsPerSample !== 16) || sampleRate === 0) {
+          console.error('PCM audio other than 16 or 24 bits not supported.');
+          return;
+        }
+        const byteCount = bitsPerSample / 8;
+
+        if (!this.buffersCreated[pid]) {
+          this.buffersCreated[pid] = await createBuffer(
+            pid, sampleRate, numOfChannels
+          );
+        }
+
+        if (!this.audioOffset[pid])
+          this.audioOffset[pid] = 0;
+
+        const channels = [...Array<Float32Array<ArrayBuffer>>(numOfChannels)]
+          .map(() => new Float32Array(
+            audio.length / byteCount / numOfChannels
+          ));
+
+        for (let idx = 0; idx < audio.length / byteCount; idx++) {
+          const rawVal = (
+            audio[idx * byteCount] << ((byteCount - 2) ? 16 : 8)
+          ) | (
+            audio[idx * byteCount + 1] << ((byteCount - 2) ? 8 : 0)
+          ) | ((byteCount - 2) ? audio[idx * 3 + 2] : 0);
+
+          const val = audio[idx * byteCount] & 0x80 ? rawVal - (
+            (byteCount - 2) ? 0x1000000 : 0x10000
+          ) : rawVal;
+
+          channels[idx % 2][Math.floor(idx / 2)] = val / (
+            Math.pow(2, bitsPerSample - 1) - Number(val >= 0)
+          );
+        }
+
+        // await ws.write(channels[0]);
+
+        await addToBuffer(
+          pid, 
+          Comlink.transfer(channels, channels.map(c => c.buffer)), 
+          this.audioOffset[pid],
+        );
+
+        this.audioOffset[pid] += audio.length / byteCount / numOfChannels;
+
+        if (this.audioOffset[pid] / sampleRate >= 1)
+          await play();
+        break;
+      }
+    }
+
+    this.chunksMap[pid].length = 0;
+  }
+
   async demux(
     configure: Comlink.Local<(codec: string) => void>,
     flush: Comlink.Local<() => void>,
@@ -61,6 +190,7 @@ export class Demuxer extends EventTarget {
     addToBuffer: Comlink.Local<(
       pid: number, channels: Float32Array<ArrayBuffer>[], audioOffset: number
     ) => void>,
+    play: Comlink.Local<() => void>,
   ) {
     // const opfs = await navigator.storage.getDirectory();
     // const fh = await opfs.getFileHandle('test.raw', { create: true });
@@ -259,122 +389,17 @@ export class Demuxer extends EventTarget {
         }
         
         if (payloadUnitStartIndicator && this.chunksMap[pid].length) {
-          const packet = new Uint8Array(this.chunksMap[pid].reduce((total, arr) => total + arr.length, 0));
-          const packetView = new DataView(packet.buffer);
-          this.chunksMap[pid].reduce((idx, chunk) => {
-            packet.set(chunk, idx);
-            return idx + chunk.length;
-          }, 0);
-
-          if (packet[0] !== 0x00 || packet[1] !== 0x00 || packet[2] !== 0x01) {
-            console.log('Invalid packet start code (0x000001).');
-            continue;
-          }
-
-          // const streamId = packetView.getUint8(3);
-          // const packetLength = packetView.getUint16(4);
-          const header = packetView.getUint16(6);
-          const ptsDtsIndicator = (header & 0xC0) >> 6;
-          const headerLength = packetView.getUint8(8);
-          const timestamp = ptsDtsIndicator ? Number(
-            (BigInt(packet[9]) & 0x0En) << 30n |
-            (BigInt(packetView.getUint16(10)) & 0xFFFEn) << 15n |
-            (BigInt(packetView.getUint16(12)) & 0xFFFEn)
-          ) : null;
-
-          if (!timestamp) {
-            console.error('No PTS in PES packet.');
-            return;
-          }
-
-          const data = packet.slice(9 + headerLength);
-
-          switch (this.streamMap[pid]) {
-            case StreamType.VIDEO_H264: {
-              // console.log('video', timestamp)
-              if (this.videoInit && data[5] === 0x10)
-                await flush();
-              
-              await decode(new EncodedVideoChunk({
-                type: data[5] === 0x10 ? 'key' : 'delta',
-                timestamp,
-                data,
-              }));
-
-              if (!this.videoInit)
-                this.videoInit = true;
-              break;
-            }
-            case StreamType.AUDIO_PCM: {
-              // console.log('audio', timestamp)
-              const pcmHeader = data.slice(0, 4);
-              const audio = data.slice(4);
-
-              const channelLayout = pcmHeader[2] >> 4;
-              const numOfChannels = channelLayout === ChannelLayouts.MONO
-                ? 1 : channelLayout === ChannelLayouts.STEREO
-                ? 2 : null;
-              if (!numOfChannels) {
-                console.error('Only mono and stereo currently supported.');
-                return;
-              }
-              const sampleRate = SAMPLE_RATES[pcmHeader[2] & 0x0F] ?? 0;
-              const bitsPerSample = BITS_PER_SAMPLE[pcmHeader[3] >> 6];
-              
-              if ((bitsPerSample !== 24 && bitsPerSample !== 16) || sampleRate === 0) {
-                console.error('PCM audio other than 16 or 24 bits not supported.');
-                return;
-              }
-              const byteCount = bitsPerSample / 8;
-
-              if (!this.buffersCreated[pid]) {
-                this.buffersCreated[pid] = await createBuffer(
-                  pid, sampleRate, numOfChannels
-                );
-              }
-
-              if (!this.audioOffset[pid])
-                this.audioOffset[pid] = 0;
-
-              const channels = [...Array<Float32Array<ArrayBuffer>>(numOfChannels)]
-                .map(() => new Float32Array(
-                  audio.length / byteCount / numOfChannels
-                ));
-
-              for (let idx = 0; idx < audio.length / byteCount; idx++) {
-                const rawVal = (
-                  audio[idx * byteCount] << ((byteCount - 2) ? 16 : 8)
-                ) | (
-                  audio[idx * byteCount + 1] << ((byteCount - 2) ? 8 : 0)
-                ) | ((byteCount - 2) ? audio[idx * 3 + 2] : 0);
-
-                const val = audio[idx * byteCount] & 0x80 ? rawVal - (
-                  (byteCount - 2) ? 0x1000000 : 0x10000
-                ) : rawVal;
-
-                channels[idx % 2][Math.floor(idx / 2)] = val / (
-                  Math.pow(2, bitsPerSample - 1) - Number(val >= 0)
-                );
-              }
-
-              // await ws.write(channels[0]);
-
-              await addToBuffer(
-                pid, 
-                Comlink.transfer(channels, channels.map(c => c.buffer)), 
-                this.audioOffset[pid],
-              );
-
-              this.audioOffset[pid] += audio.length / byteCount / numOfChannels;
-              break;
-            }
-          }
-
-          this.chunksMap[pid].length = 0;
+          await this.parsePacket(pid, flush, decode, createBuffer, addToBuffer, play);
         }
 
         this.chunksMap[pid].push(packet.slice(payloadStart));
       }
+    }
+    
+    for (const spid of Object.keys(this.chunksMap)) {
+      const pid = parseInt(spid);
+      if (this.chunksMap[pid].length)
+        await this.parsePacket(pid, flush, decode, createBuffer, addToBuffer, play);
     }
 
     // await ws.close();

@@ -12,7 +12,9 @@ export default function App() {
         const player = await Player.init();
         playerRef.current = player;
       }}>Create</button>
-      <button onClick={() => playerRef.current?.play()}>Play</button>
+      <button onClick={() => playerRef.current?.audioRenderer.changeAudioTrack(0x1100)}>Change track 1</button>
+      <button onClick={() => playerRef.current?.audioRenderer.changeAudioTrack(0x1101)}>Change track 2</button>
+      <button onClick={() => playerRef.current?.audioRenderer.changeAudioTrack(0x1102)}>Change track 3</button>
     </main>
   )
 };
